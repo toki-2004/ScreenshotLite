@@ -4,13 +4,15 @@ ScreenshotLite 屏幕截图工具（基于原 debug_capture.py 增强）
 
 保留原有功能：
     F2          立即截取鼠标所在屏幕（或命令行指定的显示器），保存到 input/ 目录
-    F3          拖拽鼠标框选区域（覆盖层显示在鼠标所在屏幕），松开后保存框选内容
+    F3          框选截图：触发时先冻结当前屏幕画面作为框选背景，再拖拽框选，
+                避免视频等动态画面在框选期间继续播放导致截错帧
     ESC         取消框选
-    自动编号    保存目录下按 1.png、2.png… 自动顺延，与示例图 input/1.png 同一套命名
+    自动编号    保存目录下按“年月日_编号”命名（如 20260811_1.png），同一天内自动顺延
 
 新增 GUI：
     - 自定义“全屏截图 / 框选截图”热键（点击输入框后按下新按键组合即可录制）
     - 自定义保存目录（浏览选择或直接输入）
+    - 开机自启动选项（写入当前用户的 Run 注册表键）
     - 实时日志窗口 + 系统托盘常驻（关闭窗口最小化到托盘）
     - 设置保存在 capture_config.json，重启后自动生效
 
@@ -20,19 +22,22 @@ ScreenshotLite 屏幕截图工具（基于原 debug_capture.py 增强）
                        传 1、2、3… 则按 mss 显示器索引截取对应屏幕
 """
 
+import datetime
 import json
 import os
 import sys
 import time
+import winreg
 
 import cv2
 import keyboard
 import mss
 import numpy as np
 from PyQt5.QtCore import Qt, QObject, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen
+from PyQt5.QtGui import QColor, QCursor, QGuiApplication, QImage, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -62,7 +67,11 @@ DEFAULT_CONFIG = {
     "fullscreen_hotkey": "f2",
     "region_hotkey": "f3",
     "save_dir": DEFAULT_SAVE_DIR,
+    "autostart": False,
 }
+
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "ScreenshotLite"
 
 COOLDOWN = 0.6  # 秒，防止按住热键时连发重复截图
 _last_shot_time = 0.0
@@ -81,10 +90,10 @@ class HotkeyBridge(QObject):
 
 
 class SelectionOverlay(QWidget):
-    """全屏半透明拖拽框选，交互与 main.py 保持一致。"""
+    """全屏冻结画面 + 半透明遮罩拖拽框选。"""
     selection_done = pyqtSignal(int, int, int, int)
 
-    def __init__(self, screen):
+    def __init__(self, screen, background_bgr=None):
         super().__init__(None)
         self._screen = screen
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -104,10 +113,22 @@ class SelectionOverlay(QWidget):
         self.mask_color = QColor(0, 0, 0, 160)
         self.rect_color = QColor(0, 255, 0, 200)
 
+        # 冻结的屏幕快照：作为框选背景，选中的区域将从该快照中裁切
+        self.background_bgr = background_bgr
+        self._bg_image = None
+        if background_bgr is not None:
+            h, w = background_bgr.shape[:2]
+            rgb = cv2.cvtColor(background_bgr, cv2.COLOR_BGR2RGB)
+            self._bg_image = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), self.mask_color)
+
+        if self._bg_image is not None and not self._bg_image.isNull():
+            painter.drawImage(self.rect(), self._bg_image)
+        else:
+            painter.fillRect(self.rect(), self.mask_color)
 
         if self.start_x is not None and self.end_x is not None:
             x = min(self.start_x, self.end_x)
@@ -170,14 +191,17 @@ class SelectionOverlay(QWidget):
 
 
 def next_save_path(save_dir):
-    """按目录下已有编号顺延，返回下一个保存路径。"""
+    """按“年月日_编号”命名顺延（如 20260811_1.png），同一天内编号递增。"""
     os.makedirs(save_dir, exist_ok=True)
+    prefix = datetime.date.today().strftime("%Y%m%d")
     numbers = []
     for name in os.listdir(save_dir):
         stem, ext = os.path.splitext(name)
-        if ext.lower() == ".png" and stem.isdigit():
-            numbers.append(int(stem))
-    return os.path.join(save_dir, f"{max(numbers) + 1 if numbers else 1}.png")
+        if ext.lower() == ".png" and stem.startswith(prefix + "_"):
+            num = stem[len(prefix) + 1:]
+            if num.isdigit():
+                numbers.append(int(num))
+    return os.path.join(save_dir, f"{prefix}_{max(numbers) + 1 if numbers else 1}.png")
 
 
 def grab_bgr(monitor):
@@ -187,18 +211,22 @@ def grab_bgr(monitor):
     return cv2.cvtColor(np.array(shot), cv2.COLOR_BGRA2BGR)
 
 
-def cursor_monitor():
-    """返回鼠标当前所在屏幕的 mss monitor 字典（虚拟桌面绝对坐标）。"""
-    screen = QGuiApplication.screenAt(QCursor.pos())
-    if screen is None:
-        screen = QGuiApplication.primaryScreen()
+def screen_monitor(screen):
+    """把 QScreen 转成 mss 的 monitor 字典（虚拟桌面绝对坐标）。"""
     if screen is not None:
         g = screen.geometry()
         return {"left": g.x(), "top": g.y(), "width": g.width(), "height": g.height()}
     # 无 QApplication 环境时回退到主显示器
     with mss.MSS() as sct:
-        m = sct.monitors[1]
-    return {"left": m["left"], "top": m["top"], "width": m["width"], "height": m["height"]}
+        return dict(sct.monitors[1])
+
+
+def cursor_monitor():
+    """返回鼠标当前所在屏幕的 mss monitor 字典（虚拟桌面绝对坐标）。"""
+    screen = QGuiApplication.screenAt(QCursor.pos())
+    if screen is None:
+        screen = QGuiApplication.primaryScreen()
+    return screen_monitor(screen)
 
 
 GUI_LOG = {"append": None}
@@ -257,7 +285,13 @@ def on_f3(overlay_ref):
     screen = QGuiApplication.screenAt(QCursor.pos())
     if screen is None:
         screen = QGuiApplication.primaryScreen()
-    overlay = SelectionOverlay(screen)
+    try:
+        # 先冻结当前屏幕画面作为框选背景，避免视频等动态画面在框选期间继续播放
+        frozen = grab_bgr(screen_monitor(screen))
+    except Exception as e:
+        emit_log(f"框选截图准备失败（无法冻结画面）: {e}")
+        return
+    overlay = SelectionOverlay(screen, background_bgr=frozen)
     overlay_ref["overlay"] = overlay
     overlay.selection_done.connect(lambda x, y, w, h: on_region_done(overlay_ref, x, y, w, h))
     overlay.show()
@@ -265,7 +299,9 @@ def on_f3(overlay_ref):
 
 def on_region_done(overlay_ref, x, y, w, h):
     overlay = overlay_ref["overlay"]
+    frozen = None
     if overlay is not None:
+        frozen = overlay.background_bgr
         # 断开信号，避免 close/deleteLater 触发 closeEvent 再次进入本回调
         try:
             overlay.selection_done.disconnect()
@@ -277,8 +313,12 @@ def on_region_done(overlay_ref, x, y, w, h):
     if x == 0 and y == 0 and w == 0 and h == 0:
         emit_log("已取消框选")
         return
+    if frozen is None:
+        emit_log("框选截图失败：画面快照丢失")
+        return
     try:
-        img = grab_bgr({"left": x, "top": y, "width": w, "height": h})
+        # 直接从冻结的快照中裁切，保证截取的是框选触发瞬间的画面
+        img = frozen[y:y + h, x:x + w]
         save_shot(img, "框选截图")
     except Exception as e:
         emit_log(f"框选截图失败: {e}")
@@ -297,7 +337,7 @@ def load_config():
             data = json.load(f)
         if isinstance(data, dict):
             for key in DEFAULT_CONFIG:
-                if data.get(key):
+                if data.get(key) is not None:
                     cfg[key] = data[key]
     except Exception:
         pass
@@ -310,6 +350,34 @@ def save_config(cfg):
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception as e:
         emit_log(f"[设置] 保存配置文件失败：{e}")
+
+
+def autostart_command():
+    """返回写入开机自启注册表的命令行。"""
+    if getattr(sys, "frozen", False):
+        return '"{}"'.format(os.path.abspath(sys.executable))
+    script = os.path.abspath(__file__)
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if os.path.exists(pythonw):
+        return '"{}" "{}"'.format(pythonw, script)
+    return '"{}" "{}"'.format(sys.executable, script)
+
+
+def set_autostart(enabled):
+    """写入/删除当前用户的 Run 注册表键，返回是否成功。"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, AUTOSTART_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError as e:
+        emit_log(f"[设置] 开机自启设置失败：{e}")
+        return False
 
 
 def key_event_to_combo(event):
@@ -440,6 +508,7 @@ class MainWindow(QMainWindow):
         self.full_edit.setText(config["fullscreen_hotkey"])
         self.region_edit.setText(config["region_hotkey"])
         self.save_edit.setText(config["save_dir"])
+        self.autostart_check.setChecked(bool(config["autostart"]))
         CURRENT_SAVE_DIR = config["save_dir"]
 
         self._connect_bridge()
@@ -472,6 +541,12 @@ class MainWindow(QMainWindow):
         save_layout.addWidget(self.save_edit, 1)
         save_layout.addWidget(browse_btn)
         root.addWidget(save_group)
+
+        general_group = QGroupBox("常规设置")
+        general_layout = QVBoxLayout(general_group)
+        self.autostart_check = QCheckBox("开机自动启动")
+        general_layout.addWidget(self.autostart_check)
+        root.addWidget(general_group)
 
         self.status_label = QLabel("")
         root.addWidget(self.status_label)
@@ -553,9 +628,10 @@ class MainWindow(QMainWindow):
     def update_status(self):
         full = self.full_edit.text().strip().lower() or DEFAULT_CONFIG["fullscreen_hotkey"]
         region = self.region_edit.text().strip().lower() or DEFAULT_CONFIG["region_hotkey"]
+        auto = "开" if self.autostart_check.isChecked() else "关"
         self.status_label.setText(
             f"热键已注册：{full} 全屏截图 / {region} 框选截图 / ESC 取消框选；"
-            f"保存目录：{self.save_edit.text()}"
+            f"保存目录：{self.save_edit.text()}；开机自启：{auto}"
         )
 
     def choose_save_dir(self):
@@ -581,11 +657,21 @@ class MainWindow(QMainWindow):
         if not self.register_hotkeys():
             return
 
+        autostart = self.autostart_check.isChecked()
+        if not set_autostart(autostart):
+            QMessageBox.warning(self, "提示", "写入开机自启设置失败，请以管理员权限运行后重试")
+            return
+
         global CURRENT_SAVE_DIR
         CURRENT_SAVE_DIR = save_dir
-        save_config({"fullscreen_hotkey": full, "region_hotkey": region, "save_dir": save_dir})
+        save_config({
+            "fullscreen_hotkey": full,
+            "region_hotkey": region,
+            "save_dir": save_dir,
+            "autostart": autostart,
+        })
         self.update_status()
-        self.append_log(f"[设置] 已保存：全屏 {full} / 框选 {region} / 目录 {save_dir}")
+        self.append_log(f"[设置] 已保存：全屏 {full} / 框选 {region} / 目录 {save_dir} / 开机自启 {'开' if autostart else '关'}")
 
     def append_log(self, msg):
         self.log_view.appendPlainText(msg)
