@@ -127,8 +127,9 @@ class SelectionOverlay(QWidget):
 
         if self._bg_image is not None and not self._bg_image.isNull():
             painter.drawImage(self.rect(), self._bg_image)
-        else:
-            painter.fillRect(self.rect(), self.mask_color)
+
+        # 半透明遮罩：让背景变暗，突出选区（冻结背景与实时桌面两种模式都生效）
+        painter.fillRect(self.rect(), self.mask_color)
 
         if self.start_x is not None and self.end_x is not None:
             x = min(self.start_x, self.end_x)
@@ -137,9 +138,14 @@ class SelectionOverlay(QWidget):
             h = abs(self.start_y - self.end_y)
 
             if w > 5 and h > 5:
-                painter.setCompositionMode(QPainter.CompositionMode_Clear)
-                painter.fillRect(x, y, w, h, Qt.transparent)
-                painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                if self._bg_image is not None and not self._bg_image.isNull():
+                    # 冻结模式：在选区内重新绘制冻结画面，恢复明亮，不露出实时桌面
+                    painter.drawImage(x, y, self._bg_image, x, y, w, h)
+                else:
+                    # 实时模式：清空选区遮罩，露出下方桌面
+                    painter.setCompositionMode(QPainter.CompositionMode_Clear)
+                    painter.fillRect(x, y, w, h, Qt.transparent)
+                    painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
                 pen = QPen(self.rect_color, 2, Qt.SolidLine)
                 painter.setPen(pen)
