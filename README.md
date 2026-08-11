@@ -34,6 +34,10 @@ pip install -r requirements.txt
 - `numpy`：图像数组
 - `PyQt5`：图形界面与托盘
 
+## 发布版（免安装）
+
+无需安装 Python 与任何依赖：从 [Releases](https://github.com/toki-2004/ScreenshotLite/releases) 下载 `ScreenshotLite.exe`，双击即可运行。该 exe 由 PyInstaller 打包为单文件，配置（`capture_config.json`）与默认截图目录（`input/`）均位于 exe 所在目录。
+
 ## 使用方法
 
 直接运行：
@@ -103,6 +107,7 @@ python screenshot_lite.py 2   # 索引 2（第二块屏幕）
 ```
 ScreenshotLite/
 ├── screenshot_lite.py      # 主程序
+├── dist/ScreenshotLite.exe # 打包后的可执行文件（在 GitHub Releases 提供下载）
 ├── capture_config.json     # 配置文件（首次运行后生成）
 ├── input/                  # 默认截图保存目录
 └── README.md

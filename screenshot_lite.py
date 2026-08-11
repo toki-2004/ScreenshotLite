@@ -50,7 +50,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# PyInstaller 冻结模式（--onefile）下 __file__ 位于临时解压目录，
+# 配置与保存目录必须指向 exe 所在目录，否则重启即丢失。
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "capture_config.json")
 DEFAULT_SAVE_DIR = os.path.join(BASE_DIR, "input")
 DEFAULT_CONFIG = {

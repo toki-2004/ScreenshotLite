@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 capture_config.json
 input/
+build/
+dist/
+*.spec
