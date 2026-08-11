@@ -182,9 +182,9 @@ class SelectionOverlay(QWidget):
             h = abs(self.start_y - self.end_y)
 
             if w > 20 and h > 20:
-                g = self._screen.geometry()
-                # 转成虚拟桌面绝对坐标，mss 按绝对坐标抓取，多屏才不会错位
-                self.selection_done.emit(g.x() + x, g.y() + y, w, h)
+                # 冻结模式下从屏幕快照直接按本地坐标裁切，多屏偏移由快照自身坐标承载，
+                # 因此这里只传覆盖层本地坐标，不能再叠加屏幕原点偏移
+                self.selection_done.emit(x, y, w, h)
             else:
                 self.close()
 
