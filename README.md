@@ -1,5 +1,7 @@
 # ScreenshotLite 极速截图工具
 
+> **语言：** 简体中文 | [English](README.en.md)
+
 ScreenshotLite 是一款以**速度**为第一原则的 Windows 屏幕截图工具：按下热键即可完成截图并保存，全流程毫秒级完成，确保快速捕捉所需画面。该工具仅专注于截图与保存这一项功能。
 
 ![热键截图演示](assets/hotkey-demo.gif)
