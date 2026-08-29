@@ -197,7 +197,10 @@ class SelectionOverlay(QWidget):
 
 
 def next_save_path(save_dir):
-    """按“年月日_编号”命名顺延（如 20260811_1.png），同一天内编号递增。"""
+    """按“年月日_编号”命名顺延（如 20260811_1.png），同一天内编号递增。
+
+    扫描最大编号后做存在性校验递增，避免多实例同时算出同名文件互相覆盖。
+    """
     os.makedirs(save_dir, exist_ok=True)
     prefix = datetime.date.today().strftime("%Y%m%d")
     numbers = []
@@ -207,7 +210,12 @@ def next_save_path(save_dir):
             num = stem[len(prefix) + 1:]
             if num.isdigit():
                 numbers.append(int(num))
-    return os.path.join(save_dir, f"{prefix}_{max(numbers) + 1 if numbers else 1}.png")
+    candidate = max(numbers) + 1 if numbers else 1
+    path = os.path.join(save_dir, f"{prefix}_{candidate}.png")
+    while os.path.exists(path):
+        candidate += 1
+        path = os.path.join(save_dir, f"{prefix}_{candidate}.png")
+    return path
 
 
 def grab_bgr(monitor):
@@ -352,8 +360,10 @@ def load_config():
 
 def save_config(cfg):
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_FILE)  # 原子替换，避免中途崩溃留下截断配置
     except Exception as e:
         emit_log(f"[设置] 保存配置文件失败：{e}")
 
@@ -609,6 +619,10 @@ class MainWindow(QMainWindow):
         """先注册新热键，成功后移除旧的，避免注册失败时留下空窗。"""
         full = self.full_edit.text().strip().lower() or DEFAULT_CONFIG["fullscreen_hotkey"]
         region = self.region_edit.text().strip().lower() or DEFAULT_CONFIG["region_hotkey"]
+        # ESC 固定用作取消框选；截图热键占用 ESC 会一次按键同时触发两个动作
+        if full == "esc" or region == "esc":
+            QMessageBox.warning(self, "热键无效", "截图热键不能设置为 esc（esc 已固定用于取消框选），请改用其他按键。")
+            return False
         new_handlers = {}
         try:
             new_handlers["fullscreen"] = keyboard.add_hotkey(full, self.bridge.full_screen.emit)
@@ -665,7 +679,8 @@ class MainWindow(QMainWindow):
 
         autostart = self.autostart_check.isChecked()
         if not set_autostart(autostart):
-            QMessageBox.warning(self, "提示", "写入开机自启设置失败，请以管理员权限运行后重试")
+            # 写 HKCU Run 键普通权限即可，失败与管理员权限无关（多为策略限制）
+            QMessageBox.warning(self, "提示", "写入开机自启设置失败：该操作只需当前用户权限，可能被注册表策略限制，可检查 HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run")
             return
 
         global CURRENT_SAVE_DIR
