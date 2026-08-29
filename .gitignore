@@ -5,3 +5,4 @@ input/
 build/
 dist/
 *.spec
+HANDOVER.md
